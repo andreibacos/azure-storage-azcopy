@@ -21,14 +21,15 @@
 package common
 
 import (
-	gcpUtils "cloud.google.com/go/storage"
 	"context"
 	"fmt"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"sync"
 
-	"github.com/minio/minio-go"
-	"github.com/minio/minio-go/pkg/credentials"
+	gcpUtils "cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // ==============================================================================================
@@ -86,14 +87,21 @@ func CreateS3Credential(ctx context.Context, credInfo CredentialInfo, options Cr
 func CreateS3Client(ctx context.Context, credInfo CredentialInfo, option CredentialOpOptions, logger ILogger) (*minio.Client, error) {
 	if credInfo.CredentialType == ECredentialType.S3PublicBucket() {
 		cred := credentials.NewStatic("", "", "", credentials.SignatureAnonymous)
-		return minio.NewWithOptions(credInfo.S3CredentialInfo.Endpoint, &minio.Options{Creds: cred, Secure: true, Region: credInfo.S3CredentialInfo.Region})
+		fmt.Println("endpoint: ", credInfo.S3CredentialInfo.Endpoint)
+		return minio.New(credInfo.S3CredentialInfo.Endpoint, &minio.Options{
+			Creds: cred, Secure: true, Region: credInfo.S3CredentialInfo.Region,
+		})
 	}
 	// Support access key
 	credential, err := CreateS3Credential(ctx, credInfo, option)
 	if err != nil {
 		return nil, err
 	}
-	s3Client, err := minio.NewWithCredentials(credInfo.S3CredentialInfo.Endpoint, credential, true, credInfo.S3CredentialInfo.Region)
+
+	// s3Client, err := minio.NewWithCredentials(credInfo.S3CredentialInfo.Endpoint, credential, true, credInfo.S3CredentialInfo.Region)
+	s3Client, err := minio.New(credInfo.S3CredentialInfo.Endpoint, &minio.Options{
+		Creds: credential, Secure: true, Region: credInfo.S3CredentialInfo.Region,
+	})
 
 	if logger != nil {
 		s3Client.TraceOn(NewS3HTTPTraceLogger(logger, LogDebug))
