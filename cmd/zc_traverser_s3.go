@@ -125,7 +125,10 @@ func (t *s3Traverser) Traverse(preprocessor objectMorpher, processor objectProce
 	searchPrefix := t.s3URLParts.ObjectKey
 
 	// It's a bucket or virtual directory
-	for objectInfo := range t.s3Client.ListObjects(t.ctx, t.s3URLParts.BucketName, minio.ListObjectsOptions{}) {
+	for objectInfo := range t.s3Client.ListObjects(t.ctx, t.s3URLParts.BucketName, minio.ListObjectsOptions{
+		Prefix:    searchPrefix,
+		Recursive: t.recursive,
+	}) {
 		if objectInfo.Err != nil {
 			return fmt.Errorf("cannot list objects, %v", objectInfo.Err)
 		}
