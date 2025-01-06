@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1319,7 +1320,7 @@ func (cca *CookedCopyCmdArgs) processRedirectionDownload(blobResource common.Res
 		blobClient, err = blockblob.NewClientWithNoCredential(u.String(), options)
 	}
 	if err != nil {
-		return fmt.Errorf("fatal: Could not create client: " + err.Error())
+		return fmt.Errorf("fatal: Could not create client: %s", err.Error())
 	}
 
 	// step 3: start download
@@ -1346,6 +1347,27 @@ func (cca *CookedCopyCmdArgs) processRedirectionDownload(blobResource common.Res
 
 func (cca *CookedCopyCmdArgs) processRedirectionUpload(blobResource common.ResourceString, blockSize int64) error {
 	ctx := context.WithValue(context.TODO(), ste.ServiceAPIVersionOverride, ste.DefaultServiceApiVersion)
+
+	// Use the concurrency environment value
+	concurrencyEnvVar := glcm.GetEnvironmentVariable(common.EEnvironmentVariable.ConcurrencyValue())
+
+	pipingUploadParallelism := pipingUploadParallelism
+	if concurrencyEnvVar != "" {
+		// handle when the concurrency value is AUTO
+		if concurrencyEnvVar == "AUTO" {
+			return errors.New("concurrency auto-tuning is not possible when using redirection transfers (AZCOPY_CONCURRENCY_VALUE = AUTO)")
+		}
+
+		// convert the concurrency value to int
+		concurrencyValue, err := strconv.ParseInt(concurrencyEnvVar, 10, 32)
+
+		//handle the error if the conversion fails
+		if err != nil {
+			return fmt.Errorf("AZCOPY_CONCURRENCY_VALUE is not set to a valid value, an integer is expected (current value: %s): %w", concurrencyEnvVar, err)
+		}
+
+		pipingUploadParallelism = int(concurrencyValue) // Cast to Integer
+	}
 
 	// if no block size is set, then use default value
 	if blockSize == 0 {
@@ -1546,7 +1568,7 @@ func (cca *CookedCopyCmdArgs) processCopyJobPartOrders() (err error) {
 	var azureFileSpecificOptions any
 	if cca.FromTo.From() == common.ELocation.File() {
 		azureFileSpecificOptions = &common.FileClientOptions{
-			AllowTrailingDot: cca.trailingDot == common.ETrailingDotOption.Enable(),
+			AllowTrailingDot: cca.trailingDot.IsEnabled(),
 		}
 	}
 
@@ -1568,8 +1590,8 @@ func (cca *CookedCopyCmdArgs) processCopyJobPartOrders() (err error) {
 
 	if cca.FromTo.To() == common.ELocation.File() {
 		azureFileSpecificOptions = &common.FileClientOptions{
-			AllowTrailingDot:       cca.trailingDot == common.ETrailingDotOption.Enable(),
-			AllowSourceTrailingDot: cca.trailingDot == common.ETrailingDotOption.Enable() && cca.FromTo.From() == common.ELocation.File(),
+			AllowTrailingDot:       cca.trailingDot.IsEnabled(),
+			AllowSourceTrailingDot: cca.trailingDot.IsEnabled() && cca.FromTo.From() == common.ELocation.File(),
 		}
 	}
 
@@ -1809,7 +1831,7 @@ func (cca *CookedCopyCmdArgs) ReportProgressOrExit(lcm common.LifecycleMgr) (tot
 
 	if jobDone {
 		exitCode := cca.getSuccessExitCode()
-		if summary.TransfersFailed > 0 {
+		if summary.TransfersFailed > 0 || summary.JobStatus == common.EJobStatus.Cancelled() || summary.JobStatus == common.EJobStatus.Cancelling() {
 			exitCode = common.EExitCode.Error()
 		}
 
@@ -2098,7 +2120,7 @@ func init() {
 	cpCmd.PersistentFlags().BoolVar(&raw.s2sSourceChangeValidation, "s2s-detect-source-changed", false, "False by default. Detect if the source file/blob changes while it is being read. This parameter only applies to service to service copies, because the corresponding check is permanently enabled for uploads and downloads.")
 	cpCmd.PersistentFlags().StringVar(&raw.s2sInvalidMetadataHandleOption, "s2s-handle-invalid-metadata", common.DefaultInvalidMetadataHandleOption.String(), "Specifies how invalid metadata keys are handled. Available options: ExcludeIfInvalid, FailIfInvalid, RenameIfInvalid (default 'ExcludeIfInvalid').")
 	cpCmd.PersistentFlags().StringVar(&raw.listOfVersionIDs, "list-of-versions", "", "Specifies a path to a text file where each version id is listed on a separate line. Ensure that the source must point to a single blob and all the version ids specified in the file using this flag must belong to the source blob only. AzCopy will download the specified versions in the destination folder provided.")
-	cpCmd.PersistentFlags().StringVar(&raw.blobTags, "blob-tags", "", "Set tags on blobs to categorize data in your storage account. Multiple blob tags should be separated by ';', i.e. 'foo=bar;some=thing'.")
+	cpCmd.PersistentFlags().StringVar(&raw.blobTags, "blob-tags", "", "Set tags on blobs to categorize data in your storage account. Multiple blob tags should be separated by '&', i.e. 'foo=bar&some=thing'.")
 	cpCmd.PersistentFlags().BoolVar(&raw.s2sPreserveBlobTags, "s2s-preserve-blob-tags", false, "False by default. Preserve blob tags during service to service transfer from one blob storage to another.")
 	cpCmd.PersistentFlags().BoolVar(&raw.includeDirectoryStubs, "include-directory-stub", false, "False by default to ignore directory stubs. Directory stubs are blobs with metadata 'hdi_isfolder:true'. Setting value to true will preserve directory stubs during transfers. Including this flag with no value defaults to true (e.g, azcopy copy --include-directory-stub is the same as azcopy copy --include-directory-stub=true).")
 	cpCmd.PersistentFlags().BoolVar(&raw.disableAutoDecoding, "disable-auto-decoding", false, "False by default to enable automatic decoding of illegal chars on Windows. Can be set to true to disable automatic decoding.")
@@ -2112,9 +2134,11 @@ func init() {
 	// so properties can be get in parallel, at same time no additional go routines are created for this specific job.
 	// The usage of this hidden flag is to provide fallback to traditional behavior, when service supports returning full properties during list.
 	cpCmd.PersistentFlags().BoolVar(&raw.s2sGetPropertiesInBackend, "s2s-get-properties-in-backend", true, "True by default. Gets S3 objects' or Azure files' properties in backend, if properties need to be accessed. Properties need to be accessed if s2s-preserve-properties is true, and in certain other cases where we need the properties for modification time checks or MD5 checks.")
-	cpCmd.PersistentFlags().StringVar(&raw.trailingDot, "trailing-dot", "", "'Enable' by default to treat file share related operations in a safe manner. Available options: "+strings.Join(common.ValidTrailingDotOptions(), ", ")+". "+
-		"Choose 'Disable' to go back to legacy (potentially unsafe) treatment of trailing dot files where the file service will trim any trailing dots in paths. This can result in potential data corruption if the transfer contains two paths that differ only by a trailing dot (ex: mypath and mypath.). If this flag is set to 'Disable' and AzCopy encounters a trailing dot file, it will warn customers in the scanning log but will not attempt to abort the operation."+
-		"If the destination does not support trailing dot files (Windows or Blob Storage), AzCopy will fail if the trailing dot file is the root of the transfer and skip any trailing dot paths encountered during enumeration.")
+	cpCmd.PersistentFlags().StringVar(&raw.trailingDot, "trailing-dot", "", "Available options: "+strings.Join(common.ValidTrailingDotOptions(), ", ")+". "+
+		"'Enable'(Default) treats trailing dot file operations in a safe manner between systems that support these files. On Windows, the transfers will not occur to stop risk of data corruption. See 'AllowToUnsafeDestination' to bypass this."+
+		"'Disable' reverts to the legacy functionality, where trailing dot files are ignored. This can result in potential data corruption if the transfer contains two paths that differ only by a trailing dot (E.g 'path/foo' and 'path/foo.'). If this flag is set to 'Disable' and AzCopy encounters a trailing dot file, it will warn customers in the scanning log but will not attempt to abort the operation."+
+		"If the destination does not support trailing dot files (Windows or Blob Storage), AzCopy will fail if the trailing dot file is the root of the transfer and skip any trailing dot paths encountered during enumeration."+
+		"'AllowToUnsafeDestination' supports transferring trailing dot files to systems that do not support them e.g Windows. Use with caution acknowledging risk of data corruption, when two files with different contents 'path/bar' and 'path/bar.' (differ only by a trailing dot) are seen as identical.")
 
 	// Public Documentation: https://docs.microsoft.com/en-us/azure/storage/blobs/encryption-customer-provided-keys
 	// Clients making requests against Azure Blob storage have the option to provide an encryption key on a per-request basis.
