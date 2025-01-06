@@ -57,6 +57,7 @@ var azcopyAwaitAllowOpenFiles bool
 var azcopyScanningLogger common.ILoggerResetable
 var azcopyCurrentJobID common.JobID
 var azcopySkipVersionCheck bool
+var isPipeDownload bool
 var retryStatusCodes string
 
 type jobLoggerInfo struct {
@@ -136,6 +137,18 @@ var rootCmd = &cobra.Command{
 
 		}
 
+		var fromToFlagValue string
+		if cmd.Flags().Changed("from-to") {
+			// Access the value of the "from-to" flag
+			fromToFlagValue, err = cmd.Flags().GetString("from-to")
+			if err != nil {
+				return fmt.Errorf("error accessing 'from-to' flag: %v", err)
+			}
+			if fromToFlagValue == "BlobPipe" {
+				isPipeDownload = true
+			}
+		}
+
 		common.AzcopyCurrentJobLogger = common.NewJobLogger(loggerInfo.jobID, azcopyLogVerbosity, loggerInfo.logFileFolder, "")
 		common.AzcopyCurrentJobLogger.OpenLog()
 
@@ -180,7 +193,7 @@ var rootCmd = &cobra.Command{
 			common.IncludeAfterFlagName, IncludeAfterDateFilter{}.FormatAsUTC(adjustedTime))
 		jobsAdmin.JobsAdmin.LogToJobLog(startTimeMessage, common.LogInfo)
 
-		if !azcopySkipVersionCheck {
+		if !azcopySkipVersionCheck && !isPipeDownload {
 			// spawn a routine to fetch and compare the local application's version against the latest version available
 			// if there's a newer version that can be used, then write the suggestion to stderr
 			// however if this takes too long the message won't get printed
@@ -220,7 +233,7 @@ func Execute(logPathFolder, jobPlanFolder string, maxFileAndSocketHandles int, j
 	if err := rootCmd.Execute(); err != nil {
 		glcm.Error(err.Error())
 	} else {
-		if !azcopySkipVersionCheck {
+		if !azcopySkipVersionCheck && !isPipeDownload {
 			// our commands all control their own life explicitly with the lifecycle manager
 			// only commands that don't explicitly exit actually reach this point (e.g. help commands and login commands)
 			select {
@@ -269,6 +282,8 @@ func init() {
 	_ = rootCmd.PersistentFlags().MarkHidden("debug-skip-files")
 }
 
+const versionMetadataUrl = "https://azcopyvnextrelease.z22.web.core.windows.net/releasemetadata/latest_version.txt"
+
 // always spins up a new goroutine, because sometimes the aka.ms URL can't be reached (e.g. a constrained environment where
 // aka.ms is not resolvable to a reachable IP address). In such cases, this routine will run for ever, and the caller should
 // just give up on it.
@@ -277,8 +292,6 @@ func init() {
 func beginDetectNewVersion() chan struct{} {
 	completionChannel := make(chan struct{})
 	go func() {
-		const versionMetadataUrl = "https://azcopyvnextrelease.blob.core.windows.net/releasemetadata/latest_version.txt"
-
 		// step 0: check the Stderr, check local version
 		_, err := os.Stderr.Stat()
 		if err != nil {
