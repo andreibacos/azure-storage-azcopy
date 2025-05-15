@@ -34,6 +34,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/data/aztables v1.3.0
 	github.com/Azure/go-autorest/autorest/date v0.3.0
 	github.com/keybase/go-keychain v0.0.0-20231219164618-57a3676c3af6
+	github.com/minio/minio-go v6.0.14+incompatible
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/net v0.38.0
 )
